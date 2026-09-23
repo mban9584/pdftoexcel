@@ -46,13 +46,13 @@ git clone https://github.com/mban9584/pdftoexcel.git ~/.qwen/skills/pdftoexcel
 
 ```powershell
 # Windows PowerShell
-$z = "$env:TEMP\pdftoexcel.zip"
-Invoke-WebRequest https://codeload.github.com/mban9584/pdftoexcel/zip/refs/heads/main -OutFile $z
-_expand = "$env:USERPROFILE\.qwen\skills\_x"
-Expand-Archive $z -DestinationPath _expand -Force
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.qwen\skills" | Out-Null
-Move-Item "$_expand\pdftoexcel-main" "$env:USERPROFILE\.qwen\skills\pdftoexcel" -Force
-Remove-Item _expand -Recurse -Force
+# 全程只在 $d 里操作，不要用 $env:TEMP——有的机器它指向不可写的 C:\Windows\TEMP
+$d = "$env:USERPROFILE\.qwen\skills"
+New-Item -ItemType Directory -Force $d | Out-Null
+Invoke-WebRequest https://codeload.github.com/mban9584/pdftoexcel/zip/refs/heads/main -OutFile "$d\pdftoexcel.zip"
+Expand-Archive "$d\pdftoexcel.zip" -DestinationPath "$d\_x" -Force
+Move-Item "$d\_x\pdftoexcel-main" "$d\pdftoexcel" -Force
+Remove-Item "$d\_x","$d\pdftoexcel.zip" -Recurse -Force
 ```
 ```bash
 # macOS / Linux
