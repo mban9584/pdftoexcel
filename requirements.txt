@@ -1,0 +1,11 @@
+# Core (every route needs these)
+pdfplumber>=0.11
+pypdfium2>=4.25
+numpy>=1.26
+opencv-python>=4.9
+openpyxl>=3.1
+Pillow>=10.0
+
+# Only for pages with no text layer (vector-outline PDFs) - probe says "outline-ocr"
+rapidocr-onnxruntime>=1.2
+onnxruntime>=1.17
