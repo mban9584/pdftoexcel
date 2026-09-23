@@ -360,7 +360,7 @@ def cmd_xlsx(a):
     out = _paths.desktop(a.pdf, a.out)
     print('work dir: %s\noutput  : %s' % (d['root'], out))
     stages.write_xlsx(a.pdf, d, out, pages, dpi=a.dpi, font=a.font,
-                      slash=None if a.autodetect_slash else a.slash)
+                      slash=a.slash)
 
 
 def main():
@@ -384,8 +384,13 @@ def main():
     p2.add_argument('--out', help='output .xlsx; default ~/Desktop/<pdf name>.xlsx')
     p2.add_argument('--dpi', type=int, default=300, help='photo crop resolution')
     p2.add_argument('--font', default='宋体')
-    p2.add_argument('--slash', action='store_true', help='force 无货 "/" inference from ink')
-    p2.add_argument('--autodetect-slash', dest='autodetect_slash', action='store_true', default=True)
+    slash = p2.add_mutually_exclusive_group()
+    slash.add_argument('--auto-slash', dest='slash', action='store_const', const=None, default=None,
+                       help='infer "/" from ink only for pages without a text layer (default)')
+    slash.add_argument('--slash', dest='slash', action='store_true',
+                       help='force 无货 "/" inference from ink')
+    slash.add_argument('--no-slash', dest='slash', action='store_false',
+                       help='disable 无货 "/" inference')
     p3 = common('check', cmd_check, xlsx=True)
     p3.add_argument('--xlsx')
     p3.add_argument('--grid', help='directory with g*/m*.json; default the --pdf work dir')
@@ -406,3 +411,4 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+

@@ -13,7 +13,7 @@ description: 把中文价格表/报价单/画册类 PDF 原样转成 Excel——
 换机器、换用户名都不用改任何东西；要放别处就加 `--work <目录>`，或设环境变量 `PDFTOEXCEL_WORK`。
 
 装依赖（只做一次）：Windows 跑 `install.bat`，macOS/Linux 跑 `sh install.sh`。
-只有"无文字层"的 PDF 才需要 `rapidocr-onnxruntime`，缺它其余流程照跑。
+只有"无文字层"的 PDF 才需要 `rapidocr-onnxruntime`，缺它其余流程照跑；需要时单独执行 `python -m pip install --user -r requirements-ocr.txt`。
 
 ## 一条流程（各阶段的确切命令）
 
@@ -25,7 +25,7 @@ python scripts/pdftoexcel.py xlsx   --pdf "输入.pdf"              # 阶段 4�
 python scripts/pdftoexcel.py check  --pdf "输入.pdf"              # 阶段 5：结构 + 逐格显示值
 ```
 `--pages`（0 基，逗号分隔）、`--work`（工作目录）、`--out`（输出文件）、`--dpi`（照片清晰度，
-默认 300）、`--font`（默认 宋体）都可加；`xlsx` 会用 `--dpi` 裁照片，25 页画册 300dpi 约 14MB。
+默认 300）、`--font`（默认 宋体）、`--auto-slash`/`--slash`/`--no-slash` 都可加；`xlsx` 会用 `--dpi` 裁照片，25 页画册 300dpi 约 14MB。
 
 ## 阶段 0：一次问清 3 件事
 
@@ -165,3 +165,5 @@ python scripts/pdftoexcel.py check --pdf 输入.pdf --xlsx 输出.xlsx     # --p
 **只读不用**——里面还留着原先那台机器的路径写法（已改为可移植常量），说明见 `scripts/pipeline/README.md`。
 可复用的实现都在 `pdftoexcel.py` + `stages.py`，路径全部由 `_paths.py` 推导，没有一处需要为新机器修改。
 细节与踩坑清单见 [reference.md](reference.md)。
+
+

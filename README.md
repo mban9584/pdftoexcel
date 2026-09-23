@@ -18,7 +18,7 @@
 | Qwen Code | `qwen --version` | `npm install -g @qwen-code/qwen-code`（需要 Node.js 18+） |
 | 网络能到 github.com 与 pypi.org | 见 1.4 的代理说明 | 公司内网/代理环境要额外配 `--proxy` |
 
-Python 库由安装脚本自动装，不用手动 pip。
+Python 库由安装脚本自动装，不用手动 pip。默认只装文字层/版式复刻所需的核心依赖；只有遇到无文字层 PDF 时，才另外安装 OCR 依赖。
 
 ## 1.2 选一个 skills 目录
 
@@ -89,7 +89,7 @@ rapidocr     ok (outline-ocr route available)
 软件把文字画成矢量描边）才需要它。要单独补装：
 
 ```
-python -m pip install --user rapidocr-onnxruntime onnxruntime
+python -m pip install --user -r requirements-ocr.txt
 ```
 
 **代理环境**（pip 走不动时）：
@@ -148,7 +148,7 @@ python scripts/pdftoexcel.py fontsize --pdf "输入.pdf" --page 1 --rect x0,y0,x
 | `--pages` | 全部 | 逗号分隔，如 `0,2,3` |
 | `--dpi` | 300 | 照片裁剪清晰度。页数多又只要打印清楚 → 200 可显著减小体积 |
 | `--font` | `宋体` | 目标机器没这字体就换 `黑体`/`等线`/`Microsoft YaHei` |
-| `--slash` | 自动 | 强制开/关"无货 `/`"的墨迹推断（有文字层时**不要开**） |
+| `--auto-slash` / `--slash` / `--no-slash` | 自动 | 自动、强制开启或关闭"无货 `/`"的墨迹推断（有文字层时通常不要强制开） |
 
 `check` 的三行输出怎么读：
 
@@ -218,4 +218,6 @@ python scripts/pdftoexcel.py fontsize --pdf "输入.pdf" --page 1 --rect x0,y0,x
 做法来自 2026-09-22/23 两份真实文件的转换（一份 5 页价格表、一份 25 页产品画册），
 过程中的判读规则与坑全部写进了 `SKILL.md` 和 `reference.md`。仓库里**只有代码和方法，没有任何业务数据**。
 
-脚本部分 MIT。
+许可证：MIT，见 [`LICENSE`](LICENSE)。
+
+

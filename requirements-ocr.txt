@@ -1,0 +1,3 @@
+# Optional: only needed for pages with no text layer (vector-outline PDFs)
+rapidocr-onnxruntime>=1.2
+onnxruntime>=1.17
