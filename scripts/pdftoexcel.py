@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 import pdfplumber
 import pypdfium2 as pdfium
+from PIL import Image, ImageDraw, ImageFont      # cv2.imwrite/read fail SILENTLY on non-ASCII paths
 
 RULE_H_MIN_LEN, RULE_TOL = 5.0, 3.0     # a rule segment: long in one axis, thin in the other
 
@@ -115,7 +116,27 @@ def detect_cells(page, scale=4.0, pad=6, min_side=10):
             j1 = j0 + 1
         if i1 < len(xs) and j1 < len(ys):
             cells.add((i0, j0, i1, j1))
-    return sorted(cells, key=lambda c: (c[1], c[0])), xs, ys
+    return pack(sorted(cells, key=lambda c: (c[1], c[0]))), xs, ys
+
+
+def pack(cells):
+    """Accept the fine regions first and drop any region whose unit squares are taken.
+
+    Flood-filled regions never truly overlap - the overlap is an artefact of snapping their
+    edges onto a deduped grid, and it is almost always a page-corner ornament (two stroked
+    squares) claiming the same indices as the real table cells, which reads as a constant
+    "7 pairs over 5 regions" on every page. Excel merges cannot overlap, so the fine cells
+    win and the spanning artefact is dropped here, before anything consumes the grid.
+    """
+    order = sorted({tuple(c) for c in cells},
+                   key=lambda c: ((c[2] - c[0]) * (c[3] - c[1]), c[3] - c[1], c[2] - c[0], c))
+    taken, out = set(), []
+    for i0, j0, i1, j1 in order:
+        if any((x, y) in taken for x in range(i0, i1) for y in range(j0, j1)):
+            continue
+        taken.update((x, y) for x in range(i0, i1) for y in range(j0, j1))
+        out.append((i0, j0, i1, j1))
+    return sorted(out, key=lambda c: (c[1], c[0]))
 
 
 def overlaps(cells):
@@ -131,6 +152,10 @@ def overlaps(cells):
 
 def _rgb(c):
     if c is None or isinstance(c, (int, float)):
+        return None
+    try:                       # Separation/Pattern colour spaces put names in the component list
+        c = [float(v) for v in c]
+    except (TypeError, ValueError):
         return None
     if len(c) == 1:
         return (1 - c[0],) * 3
@@ -194,7 +219,7 @@ def cmd_probe(a):
             for c in cells:
                 cv2.rectangle(arr, (int(xs[c[0]] * k), int(ys[c[1]] * k)),
                               (int(xs[c[2]] * k), int(ys[c[3]] * k)), (0, 160, 255), 2)
-            cv2.imwrite(os.path.join(out, 'cells', 'v%d.png' % i), arr[:, :, ::-1])
+            Image.fromarray(arr[:, :, ::-1]).save(os.path.join(out, 'cells', 'v%d.png' % i))
             sizes = sorted({round(c['size'], 1) for c in g['chars']})
             print('p%-2d %6.1fx%6.1fpt  rules h=%-5d v=%-5d  cells=%-4d (grid %dx%d, overlap %d)  imgs=%d'
                   % (i, pg.width, pg.height, len(hh), len(vv), len(cells), len(xs), len(ys),
@@ -240,6 +265,84 @@ def cmd_fontsize(a):
     print('  latin/digit -> %.1fpt  (ink/em 0.681, cap height only)' % (ink / 0.681))
     print('An OCR detection box is ~1pt taller than the ink; dividing a box height by 0.72 overstates')
     print('the size by 25-35%% - calibrate against a page that does have a text layer.')
+
+
+FONTS = [r'C:\Windows\Fonts\simsun.ttc', r'C:\Windows\Fonts\msyh.ttc',
+         '/System/Library/Fonts/Supplemental/Songti.ttc',
+         '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+         '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc']
+INK = {'red': (200, 0, 0), 'blue': (0, 0, 200), 'white': (255, 255, 255)}
+
+
+def cmd_preview(a):
+    """Draw the MODEL on the page (or on white) so misfiled text is visible without Excel.
+
+    The v*.png overlays only show the grid; this shows what the sheet will actually say, in
+    the modelled font size, blended over the original. It is the only layout check available
+    on a machine with neither Excel nor LibreOffice.
+    """
+    import _paths
+    root = a.work or _paths.workdir(a.pdf, None)
+    out = a.out_dir or os.path.join(root, 'preview')
+    os.makedirs(out, exist_ok=True)
+    font = next((f for f in FONTS if os.path.exists(f)), None)
+    if not font:
+        print('  no CJK font found - text renders as boxes; grid geometry is still valid')
+    pdf = pdfium.PdfDocument(a.pdf)
+    K = a.dpi / 72.0
+    cache = {}
+    with pdfplumber.open(a.pdf) as fp:
+        todo = range(len(fp.pages)) if not a.pages else [int(x) for x in a.pages.split(',')]
+    for i in todo:
+        mp = os.path.join(root, 'cells', 'm%d.json' % i)
+        if not os.path.exists(mp):
+            print('p%-3d no model (run: model --pdf ...)' % i)
+            continue
+        m = json.load(open(mp, encoding='utf-8'))
+        W, H = int(round(m['w'] * K)), int(round(m['h'] * K))
+        if a.plain:
+            img = Image.new('RGB', (W, H), (255, 255, 255))
+        else:
+            orig = pdf[i].render(scale=K).to_pil().convert('RGB').resize((W, H))
+            img = Image.blend(orig, Image.new('RGB', (W, H), (255, 255, 255)), 0.55)
+        dr = ImageDraw.Draw(img)
+
+        def fnt(pt):
+            px = max(6, int(round(pt * K)))
+            if font and px not in cache:
+                cache[px] = ImageFont.truetype(font, px)
+            return cache.get(px)
+
+        xs, ys = list(m['xs']), list(m['ys'])
+        for c in m['cells']:
+            i0, j0, i1, j1 = c['cell']
+            a0 = int(xs[i0] * K) if i0 < len(xs) else 0
+            b0 = int(ys[j0] * K) if j0 < len(ys) else 0
+            a1 = int(xs[i1] * K) if i1 < len(xs) else W
+            b1 = int(ys[j1] * K) if j1 < len(ys) else H
+            dr.rectangle([a0, b0, a1, b1], outline=(0, 160, 0))
+            t = c['text'].strip()
+            if not t:
+                continue
+            pt = c.get('size') or 9.0
+            f = fnt(pt)
+            lines = t.split('\n')
+            lh = int(pt * K * 1.25)
+            y = b0 + max(0, ((b1 - b0) - lh * len(lines)) // 2)
+            col = INK.get(c.get('color'), (0, 0, 0))
+            for ln in lines:
+                w = dr.textlength(ln, font=f) if f else 0
+                dr.text((a0 + max(0, (a1 - a0 - w) // 2), y), ln, font=f, fill=col)
+                y += lh
+        for fm in m.get('free') or []:
+            if not fm['text'].strip():
+                continue
+            f = fnt(fm.get('size') or 9.0)
+            dr.text((int(fm.get('x0', 0) * K), int(fm.get('y0', 0) * K)), fm['text'], font=f,
+                    fill=INK.get(fm.get('color'), (0, 0, 200)))
+        path = os.path.join(out, 'sheet_p%d.png' % i)
+        img.save(path)
+        print('p%-3d -> %s' % (i, path))
 
 
 def cmd_check(a):
@@ -305,8 +408,8 @@ def cmd_check(a):
                 got = re.sub(r'\s+', ' ', shown(ws.cell(row=j0 + 2, column=i0 + 2))).strip()
                 if got == want:
                     continue
-                if not want and got == '/':
-                    inferred += 1             # 无货 slash, added from ink at build time
+                if got in ('/', '-') and (not want or (len(want) == 1 and want in '1lI|、,，.。/／-')):
+                    inferred += 1             # 无货 mark, replaced from the ink shape at build time
                     continue
                 bx = (xs[i0 + 1], ys[j0 + 1], xs[i1 + 1], ys[j1 + 1])
                 if not want and any(min(bx[2], im[2]) - max(bx[0], im[0]) > 2
@@ -394,6 +497,10 @@ def main():
     p3 = common('check', cmd_check, xlsx=True)
     p3.add_argument('--xlsx')
     p3.add_argument('--grid', help='directory with g*/m*.json; default the --pdf work dir')
+    p6 = common('preview', cmd_preview)
+    p6.add_argument('--dpi', type=int, default=150, help='page render resolution')
+    p6.add_argument('--out-dir', dest='out_dir', help='default <work>/preview')
+    p6.add_argument('--plain', action='store_true', help='white page instead of blending the original')
     p5 = sub.add_parser('fontsize')
     p5.add_argument('--pdf', required=True)
     p5.add_argument('--page', type=int, required=True)

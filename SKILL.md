@@ -23,6 +23,7 @@ python scripts/pdftoexcel.py ocr    --pdf "输入.pdf" --pages 2,3  # 仅 outlin
 python scripts/pdftoexcel.py model  --pdf "输入.pdf"              # 阶段 2/3：出 cells/m*.json
 python scripts/pdftoexcel.py xlsx   --pdf "输入.pdf"              # 阶段 4：默认写 ~/Desktop/<同名>.xlsx
 python scripts/pdftoexcel.py check  --pdf "输入.pdf"              # 阶段 5：结构 + 逐格显示值
+python scripts/pdftoexcel.py preview --pdf "输入.pdf" --pages 2,3  # 阶段 5：把模型画成图（没有 Excel 时靠这个）
 ```
 `--pages`（0 基，逗号分隔）、`--work`（工作目录）、`--out`（输出文件）、`--dpi`（照片清晰度，
 默认 300）、`--font`（默认 宋体）、`--auto-slash`/`--slash`/`--no-slash` 都可加；`xlsx` 会用 `--dpi` 裁照片，25 页画册 300dpi 约 14MB。
@@ -97,10 +98,17 @@ RapidOCR 静默失效的坑：`use_text_det/use_angle_cls` 是**实例属性**�
 python scripts/pdftoexcel.py fontsize --pdf 输入.pdf --page N --rect x0,y0,x1,y1
 ```
 
-**TODO(verify)** 上次在同一套中文字体上测到 **CJK ink/em = 0.917、数字/西文 cap = 0.681**，
-代码里就是这两个值。**换机器或遇到别的字体（仿宋/楷体/思源）请先复测**：拿一页有文字层的 PDF
-跑上面的 `fontsize`，如果测出的字号与 PDF 声明值差超过 1pt，就去 `scripts/stages.py`
-改 `CJK_INK_RATIO` / `CAP_INK_RATIO`。
+**2026-09-23 已复测**：在 CorelDRAW X8 + 宋体的一套 72 页画册上，**CJK ink/em = 0.917、数字/西文 cap = 0.681**
+两个值成立（正文数字词框 6.2pt ÷0.681 = 9.1pt，与 12.4pt 行距自洽；标题 22.5pt ÷0.917 = 24.5pt）。
+**换机器或遇到别的字体（仿宋/楷体/思源）仍要先复测**：拿一页有文字层的 PDF 跑上面的 `fontsize`，
+测出的字号与 PDF 声明值差超过 1pt 就去 `scripts/stages.py` 改 `CJK_INK_RATIO` / `CAP_INK_RATIO`。
+
+**字号必须逐格算，不能全页一个数**。`from_ocr` 以前取"全页框高中位数"，把 A 路整页 det 框
+（**行框高 ≈ em 本身，不是 ink**，除以 0.681 会把 9.1pt 抬到 13pt）和标题混在一起，
+实测 25 页被算成 33.3pt，整张表撑爆。现在：每格优先用 B 路矢量框高 ÷ 比例，没有 B 框才退回
+A 框高 − 1.2；下限 6pt（裁切过的墨迹会低报），上限 0.92×行高（不许溢出自己那行）。
+矢量框要**按原始 B 列表取**，不能用联合去重后剩下的那份——去掉重复是文字决策，
+拿它当字号依据会连唯一的高度证据一起丢掉（实测差 2pt）。
 
 ## 阶段 4：出表
 
@@ -116,7 +124,19 @@ python scripts/pdftoexcel.py fontsize --pdf 输入.pdf --page N --rect x0,y0,x1,
   关闭 `showGridLines`。
 - **垂直对齐**：含照片的合并格用 `bottom`（原件普遍是"照片在上、名称在下"），其余 `center`。
 - **数字写成数值 + `number_format`**（按原文小数位，`6.70` 必须仍显示 6.70），这样能直接筛选/套公式。
-  带前导零的退回文本。
+  **前导零退回文本**（`020` 不能变 20）；**只认 ASCII 数字**——Python 的 `\d` 连全角 `３` 一起匹配，
+  存成数值等于静默改显示，所以数字分支用 `[0-9]`。
+  注意 `0NN` 常常是 **`Ø` 直径符号被 OCR 读成 0**（一份画册命中 485 格）：技能**不替你猜 `Ø`**，
+  只保证不把它变成数字；要不要还原自己判断（同一批数在别处以无前导零形式出现过，才是有力证据）。
+- **表外游离文字的落位**：`write_xlsx` 判断"是否压到格子"只查表格格子的 `taken`，
+  但它**每放一条都会 merge**——于是第二条游离文字可以整块压到第一条上面，
+  再往自己锚点写值就撞 `'MergedCell' object attribute 'value' is read-only'`（整表生成失败）。
+  现在放置顺序里会把已放的游离区域一并计入占用，锚点被占的**丢掉文字、保留几何**。
+- **照片里的"烤字"与形状**：整页 det（A 路）会把照片里的字也读出来。真矢量字一定在 B 路留框，
+  所以：落在大图里的 A-only 游离文字丢掉（扫描件一页能清掉 167 条）；
+  格子里 ≤3 字符的纯数字/字母且没有 B 框佐证、又被照片盖住 ≥35% 也清空（垫圈被读成 `00`/`8`/`601`）。
+  页角装饰方块同理会被读成 `6`/`3`（s=0.10–0.45，真字 ≥0.68），但它只会落到表外，
+  所以置信度过滤**只作用于游离文字**——对格子里做同样过滤会误杀窄列里的 1–2 位价格（实测丢 392 格）。
 - 颜色按模型设 red/blue。
 - **照片**：从渲染图按 bbox 裁 PNG，用 `OneCellAnchor`（单元格 + EMU 偏移，1pt = 12700 EMU）。
   别用 `add_image(ws, "B12")` 字符串锚点（尺寸会变成图片原始像素）。
@@ -125,6 +145,10 @@ python scripts/pdftoexcel.py fontsize --pdf 输入.pdf --page N --rect x0,y0,x1,
   封面/照片墙页（格子 <20）把长度门槛降到 4；都没有就用 `第N页`。
   清洗：去 `■`、合并 CJK 之间空格、`/`→`·`；重名加 `第N页`；**截断到 31 字符**。
 - **"无货"符号**：只在没有文字层的文件上按墨迹形状推断（空格子里 ink 宽 2.5–9pt、高 7–14pt → `/`）。
+  原件另一种写法是**横杠**（宽 2–12pt、**高只有 0.3–4pt**，会被 OCR 读成 `1` 或干脆读不出）——
+  横杠推断**只在识别本来就看到一个字形时触发**（`text in 1lI|、,，.。/／`）。
+  别把它推广到空格子：扁而窄的墨迹窗口和照片边缘/抗锯齿碎屑同形，一份画册里 172 个空格子命中、
+  大部分不是横杠；**空格子留空永远不会错，凭空造一个 `-` 一定会**。
   **有文字层时关掉这个推断**——原件用的是 `–` 破折号，文字层读得到。
   别照抄上一份文件的坐标：同类文件里一份是 p3 有 6 格、p4 一格都没有。
 - 打印：A4(`paperSize=9`)、`portrait`、`fitToWidth=fitToHeight=1` +
@@ -147,10 +171,22 @@ python scripts/pdftoexcel.py check --pdf 输入.pdf --xlsx 输出.xlsx     # --p
 **Excel 硬限制**（写之前记住）：sheet 名 ≤31 字符且禁 `\ / * ? : [ ]`；列宽 <6px 表达不了；
 行高上限 409.5pt。
 
-**这台机器装了 Excel / LibreOffice 吗？** 先 `where soffice` / `where excel` 问一句：
-没有的话，上面三道都是反推校验——交付时如实说明"没做视觉比对"，请用户打开看**打印预览**
-（每页应正好一张 A4）。**有就要多做一步**：把 xlsx 转成 PDF 与原件逐页对照，
-那是唯一能真正发现位置错位的检查，别只跑反推就交。
+**这台机器装了 Excel / LibreOffice 吗？** 先 `where soffice` / `where excel` 问一句。
+
+**都没有**——那就用 `preview` 自己画图看，别只跑反推就交：
+
+```
+python scripts/pdftoexcel.py preview --pdf 输入.pdf --pages 2,23        # 原页半透明 + 模型文字
+python scripts/pdftoexcel.py preview --pdf 输入.pdf --pages 2 --plain   # 只画模型（相当于白纸上表）
+```
+
+它按 `m*.json` 的格子、字号与颜色把每一页重画成 PNG（`<工作目录>/preview/sheet_p*.png`）。
+**只有它能发现"内容落错格"**——反推校验看不出整行上移/左移一列，而 `check` 反而会把这种错位
+误报成几十处"内容不一致"。用中文字体（simsun/宋体…）渲染，找不到字体时只画框不画字，几何仍然有效。
+注意 `v*.png`（阶段 1 的蓝框图）只显示格子线，不显示文字，两者不能互相替代。
+交付时仍然如实说明"没有用 Excel 打开验证"，并请用户看**打印预览**（每页应正好一张 A4）。
+
+**有**——那就多做一步：把 xlsx 转成 PDF 与原件逐页对照，那是最权威的一道。
 
 ## 阶段 6：落盘
 

@@ -28,7 +28,10 @@ INK_SCALE = 4.0
 CJK_INK_RATIO = 0.917        # verify on a new machine/font: see SKILL.md TODO(verify)
 CAP_INK_RATIO = 0.681
 SLASH_W, SLASH_H = (2.5, 9.0), (7.0, 14.0)
+DASH_W, DASH_H = (2.0, 12.0), (0.3, 4.0)     # a 无货 '—': wide and flat, OCRs as 1 or nothing
 MIN_COL_PX = 6               # below this a column cannot be expressed in width units
+OCR_CONF = 0.5               # real glyphs score 0.68+; ornaments read as 6/3 score 0.10-0.45
+DECOR_BOX = 30.0             # pt - a box this small carrying <=2 chars and a low score is decoration
 COLOR = {'red': 'FFFF0000', 'blue': 'FF0000FF', 'black': 'FF000000', 'white': 'FFFFFFFF'}
 
 
@@ -243,12 +246,74 @@ def _cover(items, b):
     return total + (cur[1] - cur[0] if cur else 0.0)
 
 
+def _cjk_major(s):
+    z = sum(1 for ch in s if '\u4e00' <= ch <= '\u9fff')
+    a = sum(1 for ch in s if ch.isalpha() or ch.isdigit())
+    return z >= max(1, (z + a) / 2)
+
+
+def _tsize(t):
+    """Point size of a single token.
+
+    B boxes are glyph ink, so size = ink / ratio (0.917 CJK, 0.681 latin). A boxes are
+    detector LINE boxes: they already span the em, so the only correction is the ~1.2pt the
+    detector pads. Dividing an A height by the latin ratio inflates 9.1pt body text to 13pt.
+    """
+    if t[5] == 'B':
+        h = t[3] - t[1]
+        return h / (CJK_INK_RATIO if _cjk_major(t[4]) else CAP_INK_RATIO) if h >= 2 else None
+    h = t[3] - t[1] - 1.2
+    return h if h >= 2 else None
+
+
+def _decor(t):
+    """A page-corner ornament (two stroked squares) clusters into one 23x23pt 'word' that
+    reads as 6/3 with s=0.10-0.45, while real glyphs stroke above 0.68.
+
+    This only ever applies to text that fell OUTSIDE the table - inside a cell a short
+    low-score token is far more likely to be a real 1-2 digit price in a narrow column, and
+    filtering there lost 392 populated cells on a 72-page catalogue.
+    """
+    return (t[6] < OCR_CONF and len(t[4].strip()) <= 2 and
+            t[2] - t[0] <= DECOR_BOX and t[3] - t[1] <= DECOR_BOX)
+
+
+def _over_images(box, images, frac=0.35):
+    fx, fy = box[2] - box[0], box[3] - box[1]
+    if fx <= 0 or fy <= 0:
+        return False
+    for im in images or []:
+        ox = min(box[2], im[2]) - max(box[0], im[0])
+        oy = min(box[3], im[3]) - max(box[1], im[1])
+        if ox > 0 and oy > 0 and (ox * oy) > frac * fx * fy:
+            return True
+    return False
+
+
+REPEAT = re.compile(r'([\u4e00-\u9fffA-Za-z]{1,6})\1')
+
+
+def dedupe_repeat(s):
+    """Collapse an immediately repeated run: the A/B union can paste a word twice.
+
+    Only CJK-led repeats are touched - '25X15X1.6' and '3333.00' are real content, while
+    '备注备注' and '●灰色灰色' are the duplication SKILL.md stage 2B warns about.
+    """
+    for _ in range(3):
+        t = REPEAT.sub(lambda m: m.group(1) if re.search(r'[\u4e00-\u9fff]', m.group(1)) else m.group(0), s)
+        if t == s:
+            break
+        s = t
+    return s
+
+
 def from_ocr(g, A, B):
     """Union of full-page detection (A) and vector word boxes (B); B wins on overlap."""
     xs, ys, cells, W, H = g['xs'], g['ys'], g['cells'], g['w'], g['h']
     a = [(b['x0'] / 1000.0 * W, b['y0'] / 1000.0 * H, b['x1'] / 1000.0 * W, b['y1'] / 1000.0 * H,
-          b['text'], 'A') for b in A]
-    b = [(w['box'][0], w['box'][1], w['box'][2], w['box'][3], w['t'], 'B') for w in B if w['t'].strip()]
+          b['text'], 'A', b.get('score', 1.0)) for b in A]
+    b = [(w['box'][0], w['box'][1], w['box'][2], w['box'][3], w['t'], 'B', w.get('s', 1.0))
+         for w in B if w['t'].strip()]
     toks = a + [t for t in b if not any(
         min(t[2], u[2]) - max(t[0], u[0]) > 0.6 * (t[2] - t[0])
         and min(t[3], u[3]) - max(t[1], u[1]) > 0.5 * (t[3] - t[1]) for u in a)]
@@ -260,19 +325,30 @@ def from_ocr(g, A, B):
         if len(same) >= 2 and _cover(same, t) >= 0.8 * (t[2] - t[0]):
             drop.update(id(s) for s in same)
     toks = [t for t in toks if id(t) not in drop]
-    # font size from measured glyph height, not from a det box padded by the detector
-    hs = [t[3] - t[1] for t in toks if t[4].strip() and t[5] == 'B'] or \
-         [max(t[3] - t[1] - 1.2, 1.0) for t in toks if t[4].strip()]
-    hs.sort()
-    body = ''.join(t[4] for t in toks if t[4].strip())
-    cjk = sum(1 for ch in body if '\u4e00' <= ch <= '\u9fff') >= len(body) / 2
-    size = round(hs[len(hs) // 2] / (CJK_INK_RATIO if cjk else CAP_INK_RATIO), 1) if hs else 12.0
+    hb = sorted(s for s in (_tsize((w['box'][0], w['box'][1], w['box'][2], w['box'][3],
+                                    w['t'], 'B', w.get('s', 1.0)))
+                            for w in B if w['t'].strip()) if s)
+    ha = sorted(s for s in (_tsize(t) for t in toks if t[4].strip() and t[5] == 'A') if s)
+    hz = hb or ha
+    size = round(hz[len(hz) // 2], 1) if hz else 12.0
     m = {'page': g['page'], 'w': W, 'h': H, 'xs': xs, 'ys': ys, 'cells': [], 'free': [],
          'images': g['images'], 'text_layer': False, 'size': size}
     seen = {}
     for t in toks:
         c = find_cell(cells, xs, ys, (t[0] + t[2]) / 2, (t[1] + t[3]) / 2)
         seen.setdefault(c if c is None else tuple(c), []).append(t)
+    # size from EVERY stroked word box, not just the ones the union kept: dropping an A/B
+    # duplicate is a text decision, and letting it stand also throws away the only accurate
+    # height measurement in that cell, which then falls back to a det box and drifts 2pt
+    bins = {}
+    for w in B:
+        if not w['t'].strip():
+            continue
+        bx = w['box']
+        s = _tsize((bx[0], bx[1], bx[2], bx[3], w['t'], 'B', w.get('s', 1.0)))
+        if s:
+            c = find_cell(cells, xs, ys, (bx[0] + bx[2]) / 2, (bx[1] + bx[3]) / 2)
+            bins.setdefault(tuple(c) if c else None, []).append(s)
     for c in cells:
         got = seen.get(tuple(c), [])
         lines = {}
@@ -289,12 +365,30 @@ def from_ocr(g, A, B):
             if s.strip():
                 txt.append(s.strip())
         box = (xs[c[0]], ys[c[1]], xs[c[2]], ys[c[3]])
-        m['cells'].append({'cell': c, 'text': clean('\n'.join(txt)), 'size': size,
+        text = dedupe_repeat(clean('\n'.join(txt)))
+        # washer rings and pipe print inside a photo read as 00/8/O/601; a glyph that is
+        # really on the page always leaves a vector box behind, a photo shape never does
+        if (text and len(text) <= 3 and not any(t[5] == 'B' for t in got)
+                and re.fullmatch(r'[0-9Ooql iI|、,.\-_/／]+', text)
+                and _over_images(box, m['images'])):
+            text = ''
+        cb = sorted(bins.get(tuple(c), []))
+        ca = sorted(s for s in (_tsize(t) for t in got if t[5] == 'A' and t[4].strip()) if s)
+        cs = cb or ca                           # vector ink first; det boxes only where nothing stroked
+        sz = round(cs[len(cs) // 2], 1) if cs else size
+        if cs:
+            sz = max(sz, 6.0)                   # clipped ink under-reports; keep it printable
+            room = (ys[c[3]] - ys[c[1]]) / max(text.count('\n') + 1, 1) if c[3] <= len(ys) else 0
+            if room > 8:
+                sz = min(sz, 0.92 * room)       # never overflow the row the text sits in
+        m['cells'].append({'cell': c, 'text': text, 'size': round(sz, 1),
                            'color': color_of(box, g.get('colored') or []), 'src': ''})
-    m['free'] = [{'text': clean(t[4]), 'size': round((t[3] - t[1]) / CJK_INK_RATIO, 1),
+    m['free'] = [{'text': dedupe_repeat(clean(t[4])), 'size': round(_tsize(t) or size, 1),
                   'color': color_of(t[:4], g.get('colored') or []),
                   'x0': t[0], 'x1': t[2], 'y0': t[1], 'y1': t[3]}
-                 for t in sorted(seen.get(None, []), key=lambda z: (round(z[1] / 6), z[0])) if t[4].strip()]
+                 for t in sorted(seen.get(None, []), key=lambda z: (round(z[1] / 6), z[0]))
+                 if t[4].strip() and not _decor(t)
+                 and not (t[5] == 'A' and _over_images(t[:4], m['images'], 0.6))]
     return m
 
 
@@ -303,8 +397,17 @@ def cover(g, toks, chars=None):
     lines = text_lines([dict(t=c['t'], x0=c['x0'], x1=c['x1'], size=c['size'],
                              col=rgb_of(c['color']), top=c['top'], bot=c['bot']) for c in chars]) \
         if chars else \
-        [{'text': clean(t[4]), 'size': round((t[3] - t[1]) / CJK_INK_RATIO, 1), 'color': 'black',
+        [{'text': dedupe_repeat(clean(t[4])), 'size': round((t[3] - t[1]) / CJK_INK_RATIO, 1),
+          'color': 'black',
           'x0': t[0], 'x1': t[2], 'y0': t[1], 'y1': t[3]} for t in toks if t[4].strip()]
+    if not chars:
+        # a scanned report page is one big image with its text already baked in; whole-page
+        # detection reads that text out again and it would land as 150+ loose strings over
+        # the picture. Text on the white part of the page has no image over it and survives.
+        big = [im for im in g['images']
+               if (im[2] - im[0]) * (im[3] - im[1]) > 0.12 * g['w'] * g['h']]
+        if big:
+            lines = [l for l in lines if not _over_images((l['x0'], l['y0'], l['x1'], l['y1']), big, 0.6)]
     xs = [0.0] + dedupe(cluster([v for im in g['images'] for v in (im[0], im[2])] +
                                 [l['x0'] for l in lines] + [l['x1'] for l in lines], 2.0), 4.0) + [g['w']]
     ys = [0.0] + dedupe(cluster([v for im in g['images'] for v in (im[1], im[3])] +
@@ -495,14 +598,21 @@ def write_xlsx(pdf, dirs, out, pages=None, dpi=300, font='宋体', slash=None, v
                 head.value = value
             return head
 
-        n_text = n_slash = 0
+        n_text = n_slash = n_dash = 0
         for c, a0, a1, b0, b1, gbox in ranges:
             text = c['text'].strip()
-            if slash and (not text or (len(text) == 1 and text in '1lI|、,，.。/／')):
+            lone = len(text) == 1 and text in '1lI|、,，.。/／'
+            if slash and (not text or lone):
                 shape = ink(page, gbox)
                 # geometry beats recognition for a lone glyph: a thin slash reads as 1 / 、 / |
                 if shape and SLASH_W[0] <= shape[0] <= SLASH_W[1] and SLASH_H[0] <= shape[1] <= SLASH_H[1]:
                     text, n_slash = '/', n_slash + 1
+                # a wide flat stroke is a 无货 dash - but only where recognition saw a glyph.
+                # On an empty cell the same window matches a photo sliver or an antialiased
+                # edge (172 such cells on one catalogue, mostly not dashes), and inventing a
+                # mark in a blank cell is always wrong while leaving it blank never is.
+                elif shape and lone and DASH_W[0] <= shape[0] <= DASH_W[1] and DASH_H[0] <= shape[1] <= DASH_H[1]:
+                    text, n_dash = '-', n_dash + 1
             has_img = False
             for im in m['images']:
                 dx, dy = min(gbox[2], im[2]) - max(gbox[0], im[0]), min(gbox[3], im[3]) - max(gbox[1], im[1])
@@ -512,27 +622,48 @@ def write_xlsx(pdf, dirs, out, pages=None, dpi=300, font='宋体', slash=None, v
             fnt = Font(name=font, size=round(c['size'] or 12.0, 1), color=COLOR.get(c['color'], 'FF000000'))
             align = Alignment(horizontal='center', vertical='bottom' if (has_img and b1 > b0) else 'center',
                               wrap_text=True)
-            if text and re.fullmatch(r'\d+(\.\d+)?', text):
-                dp = len(text.split('.')[1]) if '.' in text else 0
+            num = re.fullmatch(r'([0-9]+)(\.[0-9]+)?', text) if text else None
+            if num and len(num.group(1)) > 1 and num.group(1)[0] == '0':
+                num = None
+            if num:
+                dp = len(num.group(2)[1:]) if num.group(2) else 0
                 head = put(a0, a1, b0, b1, int(text) if dp == 0 else float(text), fnt, align, True)
                 head.number_format = '0' if dp == 0 else '0.' + '0' * dp
             else:
                 put(a0, a1, b0, b1, text or None, fnt, align, True)
             n_text += 1 if text else 0
 
+        n_skip = 0
         for f in m['free']:
             if not f['text'].strip():
                 continue
-            if page == 0 or 'i0' in f:
+            if 'i0' in f:
                 a0, a1, b0, b1 = f.get('i0', 0) + 2, f.get('i1', 0) + 1, f.get('j0', 0) + 2, f.get('j1', 0) + 1
             else:
                 (a0, a1), (b0, b1) = span(f['x0'], f['x1'], XG, ncol), span(f['y0'], f['y1'], YG, nrow)
                 a0, a1, b0, b1 = a0 + 1, a1 + 1, b0 + 1, b1 + 1
             if any(taken[x - 1][y - 1] for x in range(a0, min(a1, ncol) + 1) for y in range(b0, min(b1, nrow) + 1)):
                 a1, b1 = a0, b0
+            a0, a1 = min(a0, ncol), min(a1, ncol)
+            b0, b1 = min(b0, nrow), min(b1, nrow)
+            if taken[a0 - 1][b0 - 1]:
+                # its own top-left is inside a merge already written (table cells and every
+                # earlier loose string) - writing there raises "'MergedCell' ... read-only".
+                # Slide to the next free cell in the row, then to the rows below, before
+                # giving up: dropping the text would silently lose page titles.
+                moved = next(((x, y) for y in range(b0, min(b0 + 4, nrow) + 1)
+                              for x in range(a0 + 1, ncol + 1) if not taken[x - 1][y - 1]), None)
+                if not moved:
+                    n_skip += 1
+                    continue
+                a0, b0 = moved
+                a1, b1 = a0, b0
             fnt = Font(name=font, size=round(f['size'] or 12.0, 1), color=COLOR.get(f['color'], 'FF000000'))
-            put(min(a0, ncol), min(a1, ncol), min(b0, nrow), min(b1, nrow), f['text'].strip(), fnt,
+            put(a0, a1, b0, b1, f['text'].strip(), fnt,
                 Alignment(horizontal='center', vertical='center', wrap_text=True), False)
+            for x in range(min(a0, a1), max(a0, a1) + 1):
+                for y in range(min(b0, b1), max(b0, b1) + 1):
+                    taken[x - 1][y - 1] = True
 
         pageimg = doc[page].render(scale=scale).to_pil()
         n_img = 0
@@ -560,10 +691,10 @@ def write_xlsx(pdf, dirs, out, pages=None, dpi=300, font='宋体', slash=None, v
         ws.page_margins = PageMargins(left=0.2, right=0.2, top=0.2, bottom=0.2, header=0.05, footer=0.05)
         ws.print_area = 'A1:%s%d' % (get_column_letter(ncol), nrow)
         if verbose:
-            report.append((ws.title, page, ncol, nrow, len(ranges), n_text, n_slash, n_img))
+            report.append((ws.title, page, ncol, nrow, len(ranges), n_text, n_slash, n_dash, n_skip, n_img))
     wb.save(out)
     for r in report:
-        print('sheet %-30s p%-3d %dx%-4d cells=%-4d text=%-4d slash=%d imgs=%d' % r)
+        print('sheet %-30s p%-3d %dx%-4d cells=%-4d text=%-4d slash=%-3d dash=%-3d skip=%-3d imgs=%d' % r)
     print('saved %s (%d bytes)' % (out, os.path.getsize(out)))
     return wb
 

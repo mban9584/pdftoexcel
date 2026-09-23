@@ -137,6 +137,7 @@ python scripts/pdftoexcel.py ocr     --pdf "输入.pdf" --pages 2,3     [--dpi 3
 python scripts/pdftoexcel.py model   --pdf "输入.pdf" [--pages ...]
 python scripts/pdftoexcel.py xlsx    --pdf "输入.pdf" [--out 文件] [--dpi 300] [--font 宋体]
 python scripts/pdftoexcel.py check   --pdf "输入.pdf" [--xlsx 文件]
+python scripts/pdftoexcel.py preview --pdf "输入.pdf" [--pages 2,3] [--plain] [--dpi 150]
 python scripts/pdftoexcel.py fontsize --pdf "输入.pdf" --page 1 --rect x0,y0,x1,y1
 ```
 
@@ -155,7 +156,17 @@ python scripts/pdftoexcel.py fontsize --pdf "输入.pdf" --page 1 --rect x0,y0,x
 - `overlap=0` —— 必须为 0，否则 Excel 打开会提示"修复"
 - `col edges off PDF by max ≤0.4pt` —— 列边界与原件对齐；若出现 `drifts` 说明列宽没吸附整像素
 - `content ok (N cells)` / `MISMATCH` —— 逐格与源比对（按**格式化后的显示值**比，
-  所以 `72`+`0.00` 会被正确认成 `72.00`）
+  所以 `72`+`0.00` 会被正确认成 `72.00`）；空格子被墨迹推断成 `/` 或 `-`（无货）**不算差异**
+
+**没有装 Excel / LibreOffice 时怎么"看一眼"？** 用 `preview`：
+
+```
+python scripts/pdftoexcel.py preview --pdf "输入.pdf" --pages 2,23       # 原页半透明 + 模型文字
+```
+
+它把 `m*.json` 的格子、字号、颜色按 PDF 坐标重画成 PNG（`<work>/preview/sheet_p*.png`）。
+**只有它能发现"整行/整列错位"**——反推校验看不出这个，而 `check` 会把错位报成一堆 `MISMATCH`。
+`v*.png`（阶段 1 的蓝框图）只显示格子线不显示文字，两者不能互相替代。
 
 ## 2.3 产物与中间文件
 
@@ -163,6 +174,7 @@ python scripts/pdftoexcel.py fontsize --pdf "输入.pdf" --page 1 --rect x0,y0,x
 ~/.qwen/tmp/<PDF名>/
 ├── cells/  g*.json 几何     m*.json 内容模型     v*.png 网格叠加图（要人工看一眼）
 ├── ocr/    p*.json 整页识别  w*.json 矢量词框      （只有无文字层文件才有）
+├── preview/ sheet_p*.png 模型重画图（没有 Excel 时的视觉核对）
 └── imgs/   裁出来的产品照片
 ```
 这些 JSON 是**断点续做的关键**：下次只改出表逻辑就直接跑 `xlsx`，不用重跑几何和识别。
@@ -184,6 +196,23 @@ python scripts/pdftoexcel.py fontsize --pdf "输入.pdf" --page 1 --rect x0,y0,x
 
 **Q：数字变成 `110` 而不是 `110.00`？**
 说明该格没拿到 `number_format`。跑 `check`；`xlsx` 阶段是按原文小数位设格式的。
+
+**Q：`020` 变成了 `20`？**
+不该发生——**前导零是内容不是格式**（这类十有八九是 `Ø` 直径符号被 OCR 读成了 `0`）。
+出表时数字分支只认 ASCII `[0-9]` 且跳过前导零，全角 `３` 也不会被偷偷变成 `3`。
+要还原成 `Ø20` 得自己确认（同一批数在文件别处以无前导零形式出现过才算证据），技能不替你猜。
+
+**Q：整页文字大得离谱 / 挤成一团？**
+字号被算成了"全页一个数"。无文字层文件必须**逐格**按矢量框高反推（`stages.py` 的 `_tsize`），
+且只能用 B 路矢量框高当主证据——A 路整页 det 框是**行框**（≈em 本身），除比例会把 9pt 正文抬到 13pt。
+
+**Q：`xlsx` 阶段直接崩在 `MergedCell ... read-only`？**
+页脚/标题这类表外游离文字的落位冲突。已修：放置顺序会把先前的游离合并区一并计入占用，
+锚点被占时先在本行、再往下几行找空格。若还出现，看日志里的 `skip=` 有几条。
+
+**Q：几乎每页 `overlap` 都是同样的 7 对？**
+那是**页角装饰方块**（两个描边正方形）被洪水填成了一个封闭区。`detect_cells` 现在按
+"细粒度优先占位"丢弃这种区域，所以网格阶段就为 0。手工排查时别去调 `--pages`。
 
 **Q：照片很糊 / 文件太大？**
 `xlsx --dpi 200`（体积约降到一半）或 `--dpi 400` 更清晰。
