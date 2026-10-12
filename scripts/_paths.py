@@ -18,7 +18,9 @@ def home_tmp():
 
 
 def slug(pdf):
-    stem = os.path.splitext(os.path.basename(pdf))[0]
+    # split on both separators: os.path.basename only knows the host's, so a Windows path
+    # handed to a Linux/macOS run (or the CI) would keep its folders in the name
+    stem = os.path.splitext(re.split(r'[\\/]', pdf)[-1])[0]
     stem = re.sub(r'[^\w.\u4e00-\u9fff-]+', '_', stem).strip('_')
     return stem[:48] or 'task'
 

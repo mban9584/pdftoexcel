@@ -23,6 +23,7 @@ import pypdfium2 as pdfium
 from PIL import Image, ImageDraw, ImageFont      # cv2.imwrite/read fail SILENTLY on non-ASCII paths
 
 RULE_H_MIN_LEN, RULE_TOL = 5.0, 3.0     # a rule segment: long in one axis, thin in the other
+PAGES_PROP = 'pdftoexcel_pages'         # workbook property: source page of each sheet, in order
 
 
 def rules(page):
@@ -375,6 +376,11 @@ def cmd_check(a):
                 return '%d' % v
             return ('%d' % v) if float(v) == int(v) else ('%g' % v)
         return str(v)
+    # sheet k is not page k once xlsx ran with --pages: take the page list the build recorded,
+    # else the --pages given here, else assume one sheet per page from 0
+    pages = next((p.value for p in wb.custom_doc_props.props if p.name == PAGES_PROP), None) \
+        or a.pages
+    pages = [int(x) for x in pages.split(',')] if pages else list(range(len(wb.worksheets)))
     ok = True
     for n, ws in enumerate(wb.worksheets):
         mr = list(ws.merged_cells.ranges)
@@ -385,7 +391,7 @@ def cmd_check(a):
         line = '%-24s merges=%-4d cols=%-3d rows=%-3d imgs=%-3d overlap=%d' % (
             ws.title, len(mr), maxc, max((r.max_row for r in mr), default=ws.max_row),
             len(ws._images), len(clash))
-        g = grids.get(n)
+        g = grids.get(pages[n]) if n < len(pages) else None
         if g:
             orig = [0.0] + [float(v) for v in g['xs']] + [float(g['w'])]
             real, run = [], 0
@@ -507,12 +513,14 @@ def main():
     p5.add_argument('--rect', required=True, help='x0,y0,x1,y1 in pt')
     p5.set_defaults(func=cmd_fontsize)
     a = ap.parse_args()
-    if getattr(a, 'grid', None) is None and getattr(a, 'pdf', None):
+    if a.cmd == 'check':                 # only check takes --grid / --xlsx; fontsize has no --work
         import _paths
-        a.grid = _paths.ensure(a.pdf, a.work)['cells']
-    if a.cmd == 'check' and not getattr(a, 'xlsx', None):
-        import _paths
-        a.xlsx = _paths.desktop(a.pdf)
+        if a.grid is None and a.pdf:
+            a.grid = _paths.ensure(a.pdf, a.work)['cells']
+        if not a.xlsx:
+            if not a.pdf:
+                ap.error('check needs --xlsx or --pdf')
+            a.xlsx = _paths.desktop(a.pdf)
     a.func(a)
 
 

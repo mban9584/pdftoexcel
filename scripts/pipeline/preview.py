@@ -2,6 +2,7 @@ import json
 import os
 import sys
 
+WORK = os.environ.get('PDFTOEXCEL_WORK', os.path.expanduser('~/pdftoexcel-work'))
 DIR = os.path.join(WORK, 'cells')
 i = int(sys.argv[1])
 src = sys.argv[2] if len(sys.argv) > 2 else 'm'

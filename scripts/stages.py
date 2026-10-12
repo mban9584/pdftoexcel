@@ -18,6 +18,7 @@ from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
+from openpyxl.packaging.custom import StringProperty
 from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
@@ -33,6 +34,7 @@ MIN_COL_PX = 6               # below this a column cannot be expressed in width 
 OCR_CONF = 0.5               # real glyphs score 0.68+; ornaments read as 6/3 score 0.10-0.45
 DECOR_BOX = 30.0             # pt - a box this small carrying <=2 chars and a low score is decoration
 COLOR = {'red': 'FFFF0000', 'blue': 'FF0000FF', 'black': 'FF000000', 'white': 'FFFFFFFF'}
+PAGES_PROP = 'pdftoexcel_pages'      # workbook property read back by `check`: sheet k came from page N
 
 
 # ---------------------------------------------------------------- geometry utils
@@ -475,7 +477,7 @@ def ocr_cache(pdf, dirs, pages, dpi=300):
     try:
         from rapidocr_onnxruntime import RapidOCR
     except ImportError:
-        print('  rapidocr-onnxruntime is not installed - skipping the OCR stage (pip install -r requirements.txt)')
+        print('  rapidocr-onnxruntime is not installed - skipping the OCR stage (pip install -r requirements-ocr.txt)')
         return []
     ocr = RapidOCR()
     ocr.text_score = 0.0
@@ -685,13 +687,14 @@ def write_xlsx(pdf, dirs, out, pages=None, dpi=300, font='宋体', slash=None, v
         del pageimg
 
         ws.page_setup.paperSize = ws.PAPERSIZE_A4
-        ws.page_setup.orientation = 'portrait'
+        ws.page_setup.orientation = 'landscape' if W > H else 'portrait'
         ws.page_setup.fitToWidth = ws.page_setup.fitToHeight = 1
         ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
         ws.page_margins = PageMargins(left=0.2, right=0.2, top=0.2, bottom=0.2, header=0.05, footer=0.05)
         ws.print_area = 'A1:%s%d' % (get_column_letter(ncol), nrow)
         if verbose:
             report.append((ws.title, page, ncol, nrow, len(ranges), n_text, n_slash, n_dash, n_skip, n_img))
+    wb.custom_doc_props.append(StringProperty(name=PAGES_PROP, value=','.join(map(str, pages))))
     wb.save(out)
     for r in report:
         print('sheet %-30s p%-3d %dx%-4d cells=%-4d text=%-4d slash=%-3d dash=%-3d skip=%-3d imgs=%d' % r)
@@ -707,7 +710,7 @@ def tidy(s):
 
 def sheet_name(m, page, used, font=None):
     """Page title: it usually lives inside a merged header cell, not in margin text."""
-    if page == 0:
+    if page == 0 and not m['cells']:     # a first page that is itself a price table keeps its title
         base = '封面'
     else:
         cand = [(f['size'], tidy(f['text'])) for f in m['free']]

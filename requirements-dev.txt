@@ -1,0 +1,3 @@
+# Tests only: the end-to-end test draws its fixture PDF with reportlab
+-r requirements.txt
+reportlab>=4.0

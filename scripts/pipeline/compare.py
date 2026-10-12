@@ -3,6 +3,7 @@ import os
 import sys
 from collections import defaultdict
 
+WORK = os.environ.get('PDFTOEXCEL_WORK', os.path.expanduser('~/pdftoexcel-work'))
 DIR = os.path.join(WORK, 'cells')
 OCR = os.path.join(WORK, 'ocr')
 page = int(sys.argv[1])
