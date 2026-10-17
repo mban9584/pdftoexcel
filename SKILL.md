@@ -27,6 +27,9 @@ python scripts/pdftoexcel.py preview --pdf "输入.pdf" --pages 2,3  # 阶段 5�
 ```
 `--pages`（0 基，逗号分隔）、`--work`（工作目录）、`--out`（输出文件）、`--dpi`（照片清晰度，
 默认 300）、`--font`（默认 宋体）、`--auto-slash`/`--slash`/`--no-slash` 都可加；`xlsx` 会用 `--dpi` 裁照片，25 页画册 300dpi 约 14MB。
+`xlsx` 另有三个收尾开关：`--landscape auto|on|off`（默认 `auto`，按内容包围盒自动判横/纵向）、
+`--sheet-names 第1页,第2页` 或 `--sheet-pattern '第{page}页'`（覆盖自动重推的 sheet 名）、
+`--no-top-band`（去掉顶部那段空首行，让表头直接落第 1 行，扫描件常用）。详见 reference.md §7。
 
 ## 阶段 0：一次问清 3 件事
 
@@ -151,8 +154,10 @@ A 框高 − 1.2；下限 6pt（裁切过的墨迹会低报），上限 0.92×�
   大部分不是横杠；**空格子留空永远不会错，凭空造一个 `-` 一定会**。
   **有文字层时关掉这个推断**——原件用的是 `–` 破折号，文字层读得到。
   别照抄上一份文件的坐标：同类文件里一份是 p3 有 6 格、p4 一格都没有。
-- 打印：A4(`paperSize=9`)、`portrait`、`fitToWidth=fitToHeight=1` +
+- 打印：A4(`paperSize=9`)、`fitToWidth=fitToHeight=1` +
   `sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)`、页边距 0.2、`print_area` 到实际使用区。
+  方向由 `--landscape` 决定（默认 `auto`：按内容包围盒 `max(xs)` vs `max(ys)` 判向，宽表自动横向、
+  否则纵向；`on`/`off` 强制横/纵）。旧版写死 `portrait`，会把 8/10 列的宽表压到 ~21% 缩放。
 
 ## 阶段 5：核对（三道都要跑）
 

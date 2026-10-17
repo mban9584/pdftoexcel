@@ -10,6 +10,7 @@ import json
 import os
 import re
 from bisect import bisect_right
+from copy import copy
 
 import numpy as np
 import pdfplumber
@@ -20,6 +21,7 @@ from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 from openpyxl.worksheet.page import PageMargins
 from openpyxl.worksheet.properties import PageSetupProperties
 
@@ -76,6 +78,66 @@ def snap_grid(vals, total):
 def span(a, b, G, n):
     k0 = max(0, min(bisect_right(G, a + 0.4) - 1, n - 1))
     return k0, max(k0, min(bisect_right(G, b - 0.4) - 1, n - 1))
+
+
+def shift_rows(ws, n):
+    """Move the whole sheet up by n rows (n>0 deletes the top n rows).
+
+    ws.delete_rows does not move image anchors and does not reliably move merges, so
+    cropping the top margin band would misplace every embedded photo. Read each cell's
+    value+style into a plain dict first: once merged_cells.ranges is cleared the covered
+    MergedCell objects linger in ws._cells with a read-only .value, so writing straight
+    into a target cell raises. Rebuild ws._cells from the snapshot (dropping rows <= n),
+    then shift merges, row heights, and each image anchor._from.row by -n.
+    """
+    if n <= 0:
+        return
+    maxr, maxc = ws.max_row, ws.max_column
+    merges = [range_boundaries(str(m)) for m in list(ws.merged_cells.ranges)]
+    snap = {}
+    for r in range(1, maxr + 1):
+        for c in range(1, maxc + 1):
+            cell = ws.cell(row=r, column=c)
+            snap[(r, c)] = (cell.value, copy(cell.font), copy(cell.border), copy(cell.fill),
+                            copy(cell.alignment), cell.number_format, copy(cell.protection))
+    ws._cells = {}
+    for (r, c), (val, font, border, fill, align, numfmt, prot) in snap.items():
+        if r <= n:
+            continue
+        cell = ws.cell(row=r - n, column=c)
+        cell.value = val
+        cell.font, cell.border, cell.fill = font, border, fill
+        cell.alignment, cell.number_format, cell.protection = align, numfmt, prot
+    ws.merged_cells.ranges = []
+    for c0, r0, c1, r1 in merges:
+        if r0 > n:
+            ws.merge_cells(start_row=r0 - n, start_column=c0, end_row=r1 - n, end_column=c1)
+    heights = {k: rd.height for k, rd in ws.row_dimensions.items()}
+    for k in list(ws.row_dimensions):                 # pop, don't reassign: keep the default factory
+        ws.row_dimensions.pop(k)
+    for k, h in heights.items():
+        if k > n:
+            ws.row_dimensions[k - n].height = h
+    for im in ws._images:
+        a = im.anchor
+        if getattr(a, '_from', None) is not None:
+            a._from.row -= n
+        if getattr(a, 'to', None) is not None:
+            a.to.row -= n
+
+
+def pick_orientation(m):
+    """Landscape when the drawn grid is wider than tall (a wide multi-column table).
+
+    A4 portrait + fitToPage squashes a 8/10-column table to ~21% scale; the scan's own
+    aspect is the only signal here (no text layer to read a title orientation from).
+    """
+    xs = [float(v) for v in m.get('xs') or []]
+    ys = [float(v) for v in m.get('ys') or []]
+    W, H = float(m.get('w') or 0), float(m.get('h') or 0)
+    right = max(xs) if xs else W
+    bottom = max(ys) if ys else H
+    return 'landscape' if right > bottom else 'portrait'
 
 
 # ------------------------------------------------------------------- text utils
@@ -527,12 +589,22 @@ def ocr_cache(pdf, dirs, pages, dpi=300):
     return done
 
 
-def write_xlsx(pdf, dirs, out, pages=None, dpi=300, font='宋体', slash=None, verbose=True):
-    """cells/m*.json -> a workbook with one sheet per page, laid out like the PDF."""
+def write_xlsx(pdf, dirs, out, pages=None, dpi=300, font='宋体', slash=None, verbose=True,
+               landscape='auto', sheet_names=None, sheet_pattern=None, no_top_band=False):
+    """cells/m*.json -> a workbook with one sheet per page, laid out like the PDF.
+
+    landscape: 'auto' (per-page from the grid aspect, see pick_orientation), 'on', or 'off'.
+    sheet_names: dict {page index: title} or list [title in page order] overriding sheet_name.
+    sheet_pattern: strftime-free pattern, e.g. '第{page}页' ({page} is 1-based), per-page override.
+    no_top_band: drop the always-prepended 0->ys[0] margin band (Excel row 1) so the header
+    lands in row 1; on a raster scan that band is the empty top margin (hundreds of pt).
+    """
     pages = pages or sorted(int(re.fullmatch(r'm(\d+)\.json', f).group(1))
                             for f in os.listdir(dirs['cells']) if re.fullmatch(r'm\d+\.json', f))
     doc = pdfium.PdfDocument(pdf)
     scale = dpi / 72.0
+    if isinstance(sheet_names, (list, tuple)):
+        sheet_names = {p: t for p, t in zip(pages, sheet_names)}
     if slash is None:
         slash = not all(json.load(open(os.path.join(dirs['cells'], 'm%d.json' % p), encoding='utf-8')
                                  ).get('text_layer', True) for p in pages)
@@ -565,22 +637,31 @@ def write_xlsx(pdf, dirs, out, pages=None, dpi=300, font='宋体', slash=None, v
         m = json.load(open(os.path.join(dirs['cells'], 'm%d.json' % page), encoding='utf-8'))
         W, H = float(m['w']), float(m['h'])
         XG, XPX = snap_grid([float(x) for x in m['xs']], W)
-        YG = [0.0] + [float(y) for y in m['ys']] + [H]
+        YG = ([float(y) for y in m['ys']] + [H]) if no_top_band else \
+             ([0.0] + [float(y) for y in m['ys']] + [H])
         ncol, nrow = len(XG) - 1, len(YG) - 1
-        ws = wb.create_sheet(sheet_name(m, page, used, font))
+        title = (sheet_names or {}).get(page)
+        if not title and sheet_pattern:
+            title = sheet_pattern.format(page=page + 1, index=page)
+        ws = wb.create_sheet(title or sheet_name(m, page, used, font))
+        if title:
+            used.add(ws.title)
         ws.sheet_view.showGridLines = False
         for k in range(ncol):
             ws.column_dimensions[get_column_letter(k + 1)].width = (XPX[k] - 5) / 7
         for k in range(nrow):
             ws.row_dimensions[k + 1].height = max(YG[k + 1] - YG[k], 1.0)
         taken = [[False] * nrow for _ in range(ncol)]
+        # 列偏移恒为 +2（左边界带总在）；行偏移随 no_top_band 变：前置 0 带时 +2，
+        # 去掉顶带后 YG 少一段，单元格整体上移一行，故用 +1 才能让表头落第 1 行。
+        roff = 1 if no_top_band else 2
         ranges = []
         for c in m['cells']:
             i0, j0, i1, j1 = c['cell']
-            ranges.append((c, i0 + 2, i1 + 1, j0 + 2, j1 + 1,
-                           (XG[i0 + 1], YG[j0 + 1], XG[i1 + 1], YG[j1 + 1])))
+            ranges.append((c, i0 + 2, i1 + 1, j0 + roff, j1 + roff - 1,
+                           (XG[i0 + 1], YG[j0 + roff - 1], XG[i1 + 1], YG[j1 + roff - 1])))
             for x in range(i0 + 2, min(i1 + 1, ncol) + 1):
-                for y in range(j0 + 2, min(j1 + 1, nrow) + 1):
+                for y in range(j0 + roff, min(j1 + roff - 1, nrow) + 1):
                     taken[x - 1][y - 1] = True
 
         def put(a0, a1, b0, b1, value, fnt, align, border):
@@ -685,7 +766,10 @@ def write_xlsx(pdf, dirs, out, pages=None, dpi=300, font='宋体', slash=None, v
         del pageimg
 
         ws.page_setup.paperSize = ws.PAPERSIZE_A4
-        ws.page_setup.orientation = 'portrait'
+        orient = landscape if landscape in ('portrait', 'landscape') else \
+            ('landscape' if landscape == 'on' else 'portrait' if landscape == 'off'
+             else pick_orientation(m))
+        ws.page_setup.orientation = orient
         ws.page_setup.fitToWidth = ws.page_setup.fitToHeight = 1
         ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
         ws.page_margins = PageMargins(left=0.2, right=0.2, top=0.2, bottom=0.2, header=0.05, footer=0.05)

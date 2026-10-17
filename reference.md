@@ -97,3 +97,27 @@ def _cover(items, b):            # items 的 x 区间并集，裁到 b 区间内
   只有 Excel 会提示"修复"，所以必须自己两两求交。
 - 本机没有 Excel/LibreOffice，`soffice --convert-to pdf` 这条路不存在。
 - `$env:TEMP` 指向不可写的 `C:\Windows\TEMP`，脚本临时文件一律放自建目录。
+
+## 6. 栅格与 token 必须同基准（改 `ys` 就欠一笔同步账）
+
+`from_ocr`/`build_model` 把 OCR 归一化框按**绝对 pt** 还原（`y = y0/1000*h`，`h` 是整页高），
+再用 `find_cell` 拿 token 中心去比对栅格 `ys`。所以**上移栅格 `ys`（抬顶线、压上边距）必须把
+token 的 y 同步上移同样的量**，否则每个 token 相对新栅格整体下沉、表头错位、`free` 暴涨。
+
+- 只动 `ys`、不动 token：实测表头落到第 3/16/6 行、顶部空 3 行、`free` 从 1/0/0 涨到 16/110/38。
+- `h` 与 `images` 保持**绝对**：`write_xlsx` 用绝对坐标从渲染图上 `pageimg.crop()` 裁照片，
+  给它们减偏移会让每张贴图错位。抬顶线时把末行拉到页高 `H`（`ys[-1]=H`）补住底部，末行数据才不落进
+  `ys[-1]` 之下变 `free`。
+
+## 7. write_xlsx 的三个收尾开关（免掉事后脚本）
+
+- `--landscape auto|on|off`（默认 `auto`）：`auto` 按内容包围盒 `max(xs)` vs `max(ys)` 判向——
+  宽表（8/10 列）自动横向，否则 A4 纵向 + fitToPage 把它压到 ~21% 缩放。旧版写死 `portrait`。
+- `--sheet-names 第1页,第2页` 或 `--sheet-pattern '第{page}页'`：覆盖 `sheet_name()` 从最大字号
+  中文标题重推、第 0 页写死「封面」那套，不用再事后 `rename_sheets.py` 改名。
+- `--no-top-band`：`YG = ys + [H]`（不再前置 `0→ys[0]` 那段空带 = Excel 第 1 行）。扫描件 `ys[0]`
+  落在上边距，那段就是几百 pt 的空首行；去掉后表头直接落第 1 行。
+- 事后要整表上移 N 行（删顶部空行）用 `stages.shift_rows(ws, n)`：值/样式/合并区/行高/图片锚点一起搬。
+  别用 `ws.delete_rows`——它不搬图片锚点、不可靠搬合并区；且拆了 `merged_cells.ranges` 后
+  `MergedCell` 仍留在 `ws._cells` 里、`.value` 只读，直接往目标格写会炸（`shift_rows` 先快照进
+  dict、清 `ws._cells` 再重建绕开）。

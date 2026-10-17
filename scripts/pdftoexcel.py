@@ -461,9 +461,11 @@ def cmd_xlsx(a):
     d = _paths.ensure(a.pdf, a.work)
     pages = [int(x) for x in a.pages.split(',')] if a.pages else None
     out = _paths.desktop(a.pdf, a.out)
+    names = a.sheet_names.split(',') if a.sheet_names else None
     print('work dir: %s\noutput  : %s' % (d['root'], out))
     stages.write_xlsx(a.pdf, d, out, pages, dpi=a.dpi, font=a.font,
-                      slash=a.slash)
+                      slash=a.slash, landscape=a.landscape, sheet_names=names,
+                      sheet_pattern=a.sheet_pattern, no_top_band=a.no_top_band)
 
 
 def main():
@@ -494,6 +496,15 @@ def main():
                        help='force 无货 "/" inference from ink')
     slash.add_argument('--no-slash', dest='slash', action='store_false',
                        help='disable 无货 "/" inference')
+    p2.add_argument('--landscape', choices=['auto', 'on', 'off'], default='auto',
+                    help="print orientation: auto = per-page from the grid aspect (wide table -> landscape), "
+                         "on/off = force landscape/portrait (default auto)")
+    p2.add_argument('--sheet-names', dest='sheet_names',
+                    help='comma list of sheet titles in page order, overriding the auto heading (e.g. 第1页,第2页)')
+    p2.add_argument('--sheet-pattern', dest='sheet_pattern',
+                    help="sheet title pattern, e.g. '第{page}页' ({page} is 1-based); overruled by --sheet-names")
+    p2.add_argument('--no-top-band', dest='no_top_band', action='store_true',
+                    help="drop the prepended 0->ys[0] margin band (Excel row 1) so the header lands in row 1")
     p3 = common('check', cmd_check, xlsx=True)
     p3.add_argument('--xlsx')
     p3.add_argument('--grid', help='directory with g*/m*.json; default the --pdf work dir')
